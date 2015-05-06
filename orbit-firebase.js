@@ -776,6 +776,7 @@ define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', '
 	exports['default'] = objects.Class.extend({
 		init: function(firebaseClient, schema, serializer, cache){
 			this._schema = schema;
+			this._firebaseClient = firebaseClient;
 
 			this._transformers = [
 				new AddRecord['default'](firebaseClient, schema, serializer),
@@ -791,9 +792,18 @@ define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', '
 		},
 
 		transform: function(operation){
+			var _this = this;
 			this._normalizeOperation(operation);
+
 			var transformer = this._findTransformer(operation);
-			return transformer.transform(operation);
+			return transformer.transform(operation).then(function(result){
+				var logEntry = operation.serialize();
+				logEntry.jobStatus = new Date().getTime().toString() + ":pending";
+
+				return _this._firebaseClient.push('operations', logEntry).then(function(){
+					return result;
+				});
+			});
 		},
 
 	    _normalizeOperation: function(op) {
