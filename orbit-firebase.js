@@ -799,6 +799,7 @@ define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', '
 			return transformer.transform(operation).then(function(result){
 				var logEntry = operation.serialize();
 				logEntry.jobStatus = "active:" + new Date().getTime().toString();
+				logEntry.version = 0;
 
 				return _this._firebaseClient.push('operation', logEntry).then(function(){
 					return result;
