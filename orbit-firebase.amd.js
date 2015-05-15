@@ -109,6 +109,30 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 			this.firebaseRef = firebaseRef;
 		},
 
+		authenticateAdmin: function(secret){
+			return this._authenticate(secret);
+		},
+
+		authenticateUser: function(secret, userDetails){
+			var tokenGenerator = new FirebaseTokenGenerator("qhZ7kS15BjTXbwGLkXtqxGP6HLxDTzUDlEivT70M");
+	    var userToken = tokenGenerator.createToken(userDetails);
+	    return this._authenticate(userToken);
+		},
+
+		_authenticate: function(token){
+			var _this = this;
+			return new Orbit['default'].Promise(function(resolve, reject){
+				_this.firebaseRef.authWithCustomToken(token, function(error){
+					if(error){
+						reject(error);
+					}
+					else {
+						resolve();
+					}
+				});
+			});
+		},
+
 		set: function(path, value){
 			path = this._normalizePath(path);
 
@@ -157,11 +181,11 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 					resolve(snapshot.val());
 
 				}, function(error){
-					reject(reject);
+					reject(error);
 				});
 			});
 		},
-		
+
 		removeFromArray: function(arrayPath, value){
 			var _this = this;
 
@@ -187,7 +211,7 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 				array = array_utils.removeAt(array, index);
 				return _this.set(arrayPath, array);
 			});
-		},		
+		},
 
 		appendToArray: function(arrayPath, value){
 			var _this = this;
@@ -198,14 +222,14 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 				if(array.indexOf(value) === -1){
 					array.push(value);
 				}
-				return _this.set(arrayPath, array);	
+				return _this.set(arrayPath, array);
 
 			});
 		},
 
 	    _normalizePath: function(path) {
 	    	return (typeof path === 'string') ? path : path.join('/');
-	    },	
+	    },
 	});
 
 });
@@ -493,8 +517,28 @@ define('orbit-firebase/firebase-requester', ['exports', 'orbit/lib/objects', 'or
 					promised[i] = _this._firebaseClient.valueAt([model, ids[i]]);
 				}
 
-				return Orbit['default'].map(promised, function(record){
-					return _this._serializer.deserialize(model, record.id, record);
+				return new Orbit['default'].Promise(function(resolve, reject){
+					Orbit['default'].allSettled(promised).then(function(settled){
+						var records = [];
+
+						settled.forEach(function(promiseResult){
+							if(promiseResult.state === 'rejected'){
+								if(promiseResult.reason.code === 'PERMISSION_DENIED'){
+									// filter out of records
+								}
+								else {
+									throw new Error(promiseResult.reason);
+								}
+							}
+							else if(promiseResult.state === 'fulfilled'){
+								var serialized = promiseResult.value;
+								var deserialized = _this._serializer.deserialize(model, serialized.id, serialized);
+								records.push(deserialized);
+							}
+						});
+
+						resolve(records);
+					});
 				});
 			});
 		},
