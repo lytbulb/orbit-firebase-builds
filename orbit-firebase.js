@@ -122,7 +122,7 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 		},
 
 		authenticateUser: function(secret, userDetails){
-			var tokenGenerator = new FirebaseTokenGenerator("qhZ7kS15BjTXbwGLkXtqxGP6HLxDTzUDlEivT70M");
+			var tokenGenerator = new FirebaseTokenGenerator(secret);
 	    var userToken = tokenGenerator.createToken(userDetails);
 	    return this._authenticate(userToken);
 		},
@@ -295,7 +295,31 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 				return _this.subscribeToRecord(type, id, options);
 			});
 
-			return Orbit['default'].all(promises);
+			return this._settleAllPermitted(promises);
+		},
+
+		_settleAllPermitted: function(promises){
+			return new Orbit['default'].Promise(function(resolve, reject){
+				Orbit['default'].allSettled(promises).then(function(settled){
+					var values = [];
+
+					settled.forEach(function(promiseResult){
+						if(promiseResult.state === 'rejected'){
+							if(promiseResult.reason.code === 'PERMISSION_DENIED'){
+								// filter out values that have access denied
+							}
+							else {
+								throw new Error(promiseResult.reason);
+							}
+						}
+						else if(promiseResult.state === 'fulfilled'){
+							values.push(promiseResult.value);
+						}
+					});
+
+					resolve(values);
+				});
+			});
 		},
 
 		subscribeToRecord: function(type, id, subscriptionOptions){
@@ -306,7 +330,7 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 		},
 
 		subscriptions: function(){
-			return Object.keys(this._listeners);
+			return Object.keys(this._subscriptions);
 		},
 
 		unsubscribeAll: function(){
@@ -326,7 +350,6 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 		},
 
 		_subscribeToLink: function(type, id, link, options){
-			// console.log("subscribing to link", [type, id, link].join("/"));
 			var _this = this;
 			var linkType = this._schemaUtils.lookupLinkDef(type, link).type;
 
@@ -350,7 +373,7 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 			return this._addSubscription(path, HasOneSubscription['default'], options);
 		},
 
-		_findSubscription: function(path){
+		findSubscription: function(path){
 			return this._subscriptions[path];
 		},
 
@@ -362,31 +385,49 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 		},
 
 		_addSubscription: function(path, SubscriptionClass, subscriptionOptions){
-			// console.log("subscription:add", path);
-			var subscription = this._findSubscription(path);
+			subscriptionOptions = subscriptions__options.buildOptions(subscriptionOptions);
+			var _this = this;
+			var subscription = this.findSubscription(path);
 
-			if(subscription){
-				var mergedOptions = this._mergeOptions(subscription.options, subscriptionOptions);
-				if(!eq.eq(mergedOptions, subscription.options)){
-					// console.log("subscription:updating", path);
-					subscription.options = subscriptionOptions;
-					return subscription.update().then(function(){
-						// console.log("subscription:updated", path);
-					});
-				}
-				else {
-					// console.log("subscription:duplicate", path);
-					return Orbit['default'].resolve();
-				}
+			if(!subscription) {
+				subscription = this._createSubscription(SubscriptionClass, path);
+				this._subscriptions[path] = subscription;
+			}
+
+			if(subscription.status === 'active'){
+				return this._updateSubscription(subscription, subscriptionOptions);
 			}
 			else {
-				// console.log("subscription:activating", path);
-				subscription = new SubscriptionClass(path, this);
-				subscription.options = subscriptionOptions || subscriptions__options.buildOptions({});
-				this._subscriptions[path] = subscription;
-				return subscription.activate().then(function(){
-					// console.log("subscription:activated", path);
+				return this._activateSubscription(subscription, subscriptionOptions);
+			}
+		},
+
+		_createSubscription: function(SubscriptionClass, path, options){
+			var subscription = new SubscriptionClass(path, this);
+			subscription.status = "new";
+			return subscription;
+		},
+
+		_activateSubscription: function(subscription, options){
+			subscription.options = options;
+			return subscription.activate().then(
+				function(){
+					subscription.status = "active";
+
+				}, function(error){
+					subscription.status = error.code === "PERMISSION_DENIED" ? "permission_denied" : "error";
+					if(subscription.status === 'error') throw error;
 				});
+		},
+
+		_updateSubscription: function(subscription, options){
+			var mergedOptions = this._mergeOptions(subscription.options, options);
+			if(!eq.eq(mergedOptions, subscription.options)){
+				subscription.options = options;
+				return subscription.update();
+			}
+			else {
+				return Orbit['default'].resolve();
 			}
 		},
 
@@ -395,7 +436,6 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 		},
 
 		_emitDidTransform: function(operation){
-			// console.log("emitting", operation.serialize());
 			this.emit("didTransform", operation);
 		},
 
@@ -403,18 +443,19 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 			var _this = this;
 			path = (typeof path === 'string') ? path : path.join('/');
 			var key = this._buildListenerKey(path, eventType);
-			// console.log("enabling listener", key);
 
 			if(this._listenerExists(key)) return Orbit['default'].resolve();
 
 			return new Orbit['default'].Promise(function(resolve, reject){
 				var wrappedCallback = function(){
 					var result = callback.apply(_this, arguments);
+					_this._listeners[key] = wrappedCallback;
 					resolve(result);
 				};
 
-				_this._listeners[key] = wrappedCallback;
-				_this._firebaseRef.child(path).on(eventType, wrappedCallback);
+				_this._firebaseRef.child(path).on(eventType, wrappedCallback, function(error){
+					reject(error);
+				});
 			});
 		},
 
@@ -525,28 +566,34 @@ define('orbit-firebase/firebase-requester', ['exports', 'orbit/lib/objects', 'or
 					promised[i] = _this._firebaseClient.valueAt([model, ids[i]]);
 				}
 
-				return new Orbit['default'].Promise(function(resolve, reject){
-					Orbit['default'].allSettled(promised).then(function(settled){
-						var records = [];
-
-						settled.forEach(function(promiseResult){
-							if(promiseResult.state === 'rejected'){
-								if(promiseResult.reason.code === 'PERMISSION_DENIED'){
-									// filter out of records
-								}
-								else {
-									throw new Error(promiseResult.reason);
-								}
-							}
-							else if(promiseResult.state === 'fulfilled'){
-								var serialized = promiseResult.value;
-								var deserialized = _this._serializer.deserialize(model, serialized.id, serialized);
-								records.push(deserialized);
-							}
-						});
-
-						resolve(records);
+				return _this._settleAllPermitted(promised).then(function(serialized){
+					return array_utils.map(serialized, function(record){
+						return _this._serializer.deserialize(model, record.id, record);
 					});
+				});
+			});
+		},
+
+		_settleAllPermitted: function(promises){
+			return new Orbit['default'].Promise(function(resolve, reject){
+				Orbit['default'].allSettled(promises).then(function(settled){
+					var values = [];
+
+					settled.forEach(function(promiseResult){
+						if(promiseResult.state === 'rejected'){
+							if(promiseResult.reason.code === 'PERMISSION_DENIED'){
+								// filter out values that have access denied
+							}
+							else {
+								throw new Error(promiseResult.reason);
+							}
+						}
+						else if(promiseResult.state === 'fulfilled'){
+							values.push(promiseResult.value);
+						}
+					});
+
+					resolve(values);
 				});
 			});
 		},
@@ -726,6 +773,7 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 
 			assert.assert('FirebaseSource requires Orbit.Promise be defined', Orbit['default'].Promise);
 			assert.assert('FirebaseSource requires Orbit.all be defined', Orbit['default'].all);
+			assert.assert('FirebaseSource requires Orbit.allSettled be defined', Orbit['default'].allSettled);
 			assert.assert('FirebaseSource requires Orbit.map be defined', Orbit['default'].map);
 			assert.assert('FirebaseSource requires Orbit.resolve be defined', Orbit['default'].resolve);
 			assert.assert('FirebaseSource requires firebaseRef be defined', options.firebaseRef);
@@ -1342,7 +1390,6 @@ define('orbit-firebase/subscriptions/has-many-subscription', ['exports', 'orbit/
 		},
 
 		_recordAdded: function(snapshot){
-			// console.log("has-many.recordAdded");
 			var options = this.options;
 			var type = this._type;
 			var recordId = this._recordId;
@@ -1382,13 +1429,9 @@ define('orbit-firebase/subscriptions/has-many-subscription', ['exports', 'orbit/
 			return listener._firebaseClient.valueAt(path).then(function(linkValue){
 				var recordIds = Object.keys(linkValue||{});
 
-				var promises = array_utils.map(recordIds, function(recordId){
-					return listener.subscribeToRecord(linkType, recordId, _this.options);
-				});
-
-				return Orbit['default'].all(promises);
+				return listener.subscribeToRecords(linkType, recordIds, _this.options);
 			});
-		},
+		}
 	});
 
 });
