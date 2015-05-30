@@ -152,7 +152,7 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 	});
 
 });
-define('orbit-firebase/firebase-connector', ['exports', 'orbit-common/main', 'orbit/transform-connector', 'orbit-common/operation-encoder', 'orbit/lib/eq'], function (exports, OC, TransformConnector, OperationEncoder, eq) {
+define('orbit-firebase/firebase-connector', ['exports', 'orbit-common/main', 'orbit/transform-connector', 'orbit-common/operation-encoder', 'orbit/lib/eq', 'orbit-common/lib/exceptions'], function (exports, OC, TransformConnector, OperationEncoder, eq, exceptions) {
 
   'use strict';
 
@@ -219,7 +219,11 @@ define('orbit-firebase/firebase-connector', ['exports', 'orbit-common/main', 'or
     _modifyHasManyContents: function(operation, record){
       var linkPath = operation.path.slice(0,4);
       var linkValue = this.target.retrieve(linkPath);
-      if(linkValue === OC['default'].LINK_NOT_INITIALIZED) throw new Error("Can not add to a hasMany that hasn't been initialized");
+
+      if(linkValue === OC['default'].LINK_NOT_INITIALIZED) {
+        throw new exceptions.LinkNotInitializedException(operation.path[0], operation.path[1], operation.path[3]);
+      }
+
       return record ? [operation] : [];
     }
   });
