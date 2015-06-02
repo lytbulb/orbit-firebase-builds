@@ -1679,7 +1679,7 @@ define('orbit-firebase/subscriptions/has-one-subscription', ['exports', 'orbit/l
 		_emitOperation: function(path, value){
 			var op = this.linkInitialized ? 'replace' : 'add';
 			this.linkInitialized = true;
-			this._listener._emitDidTransform(new Operation['default']({op: op, path: path, value: value}));
+			this._listener._emitDidTransform(new Operation['default']({op: op, path: path, value: value||null}));
 		}
 	});
 
