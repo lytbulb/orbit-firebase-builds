@@ -1557,7 +1557,7 @@ define('orbit-firebase/subscriptions/has-many-subscription', ['exports', 'orbit/
 		},
 
 		_recordAdded: function(snapshot){
-			var options = this.options.addInclude(this._inverseLink);
+			var options = this._inverseLink ? this.options.addInclude(this._inverseLink) : this.options;
 			var type = this._type;
 			var recordId = this._recordId;
 			var link = this._link;
@@ -1654,7 +1654,7 @@ define('orbit-firebase/subscriptions/has-one-subscription', ['exports', 'orbit/l
 			var _this = this;
 			var listener = this._listener;
 			var linkType = this._linkType;
-			var options = this.options.addInclude(this._inverseLink);
+			var options = this._inverseLink ? this.options.addInclude(this._inverseLink) : this.options;
 			var type = this._type;
 			var link = this._link;
 			var path = this._path;
@@ -1706,6 +1706,7 @@ define('orbit-firebase/subscriptions/options', ['exports', 'orbit/lib/objects'],
     },
 
     addInclude: function(link){
+      if(!link) throw new Error("link not specified");
       var options = objects.clone(this);
       if(!options.include) options.include = {};
       options.include[link] = {};
