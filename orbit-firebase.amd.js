@@ -386,7 +386,7 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 
 			}).catch(function(error){
 				subscription.status = error.code === "PERMISSION_DENIED" ? "permission_denied" : "error";
-				console.log("---! permission denied", subscription.path);
+				// console.log("---! permission denied", subscription.path);
 
 				if(subscription.status !== "permission_denied") throw error;
 
