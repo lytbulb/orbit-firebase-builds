@@ -806,7 +806,10 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 				if(operation.op === "add" && operation.path.length === 2){
 					var type = operation.path[0];
 					var allLinks = _this._schemaUtils.linksFor(type);
-					return _this._subscribeToRecords(type, result, {include: allLinks});
+					_this._subscribeToRecords(type, result, {include: allLinks});
+					return _this._firebaseListener.then(function(){
+						console.log("transform complete");
+					});
 				}
 
 				else if(operation.op !== "remove" && operation.path.length === 2){
@@ -1185,8 +1188,6 @@ define('orbit-firebase/mixins/invocations-tracker', ['exports', 'orbit/main', 'o
           var promise = callback.apply(_this, args);
           invocations.push(promise);
 
-          var startTime = new Date().getTime();
-
           return promise.finally(function(){
             var index = invocations.indexOf(promise);
 
@@ -1196,12 +1197,6 @@ define('orbit-firebase/mixins/invocations-tracker', ['exports', 'orbit/main', 'o
 
             if(invocations.length === 0){
               _this.emit("_clearedInvocations");
-            }
-
-            var invocationTime = Math.round((new Date().getTime() - startTime)/1000);
-
-            if(invocationTime > 3) {
-              console.log("time: ", invocationTime, args);
             }
           });
         };
