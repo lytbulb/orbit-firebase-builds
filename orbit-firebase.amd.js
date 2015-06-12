@@ -743,9 +743,7 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 					var type = operation.path[0];
 					var allLinks = _this._schemaUtils.linksFor(type);
 					_this._subscribeToRecords(type, result, {include: allLinks});
-					return _this._firebaseListener.then(function(){
-						console.log("transform complete");
-					});
+					return _this._firebaseListener;
 				}
 
 				else if(operation.op !== "remove" && operation.path.length === 2){
