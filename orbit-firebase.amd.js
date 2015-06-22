@@ -68,7 +68,7 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 
 		push: function(path, value){
 			var _this = this;
-			return new Promise(function(resolve, reject){
+			return new Orbit['default'].Promise(function(resolve, reject){
 				_this.firebaseRef.child(path).push(value, function(error){
 					if(error) {
 						reject(error);
@@ -1160,7 +1160,7 @@ define('orbit-firebase/mixins/invocations-tracker', ['exports', 'orbit/main', 'o
       then: function(callback){
         var _this = this;
 
-        return new Promise(function(resolve, reject){
+        return new Orbit['default'].Promise(function(resolve, reject){
           if(_this._invocations.length === 0) resolve(callback());
           else _this.one("_clearedInvocations", function(){
             resolve(callback());
