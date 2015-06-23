@@ -177,6 +177,7 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 		init: function(firebaseRef, schema, serializer){
 			Evented['default'].extend(this);
 			InvocationsTracker['default'].extend(this);
+			window.firebaseListener = this;
 
 			this._firebaseRef = firebaseRef;
 			this._firebaseClient = new FirebaseClient['default'](this._firebaseRef);
@@ -326,7 +327,6 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 
 			}).catch(function(error){
 				subscription.status = error.code === "PERMISSION_DENIED" ? "permission_denied" : "error";
-				// console.log("---! permission denied", subscription.path);
 
 				if(subscription.status !== "permission_denied") throw error;
 
@@ -1471,7 +1471,7 @@ define('orbit-firebase/operation-sequencer', ['exports', 'orbit/evented', 'orbit
 
       var relatedRecordPath = this._getRelatedRecordPath(operation);
       var linkPath = this._getLinkPath(operation);
-      if (this._isModifyHasManyOp(operation)) return [recordPath, relatedRecordPath];
+      if (this._isModifyHasManyOp(operation)) return [recordPath, relatedRecordPath, linkPath];
 
       return [];
     },
@@ -1839,7 +1839,7 @@ define('orbit-firebase/subscriptions/options', ['exports', 'orbit/lib/objects'],
   }
 
 });
-define('orbit-firebase/subscriptions/record-subscription', ['exports', 'orbit-firebase/subscriptions/subscription', 'orbit/operation', 'orbit/main'], function (exports, Subscription, Operation, Orbit) {
+define('orbit-firebase/subscriptions/record-subscription', ['exports', 'orbit-firebase/subscriptions/subscription', 'orbit/operation', 'orbit/main', 'orbit-firebase/transformations'], function (exports, Subscription, Operation, Orbit, transformations) {
 
 	'use strict';
 
@@ -1847,18 +1847,23 @@ define('orbit-firebase/subscriptions/record-subscription', ['exports', 'orbit-fi
 		init: function(path, listener){
 			this.path = path;
 			this.listener = listener;
+			var splitPath = this.path.split("/");
+			this.type = splitPath[0];
+			this.recordId = splitPath[1];
+			this.modelSchema = listener._schemaUtils.modelSchema(this.type);
 		},
 
 		activate: function(){
+			var _this = this;
 			var listener = this.listener;
 			var path = this.path;
-			var splitPath = this.path.split("/");
-			var type = splitPath[0];
-			var recordId = splitPath[1];
-			var modelSchema = listener._schemaUtils.modelSchema(type);
+			var type = this.type;
+			var recordId = this.recordId;
+			var modelSchema = this.modelSchema;
 			var options = this.options;
 
 			return listener._enableListener(path, "value", function(snapshot){
+				_this.subscribeToAttributes();
 				var value = snapshot.val();
 
 				if(value){
@@ -1868,15 +1873,34 @@ define('orbit-firebase/subscriptions/record-subscription', ['exports', 'orbit-fi
 					listener._emitDidTransform(new Operation['default']({ op: 'remove', path: path }));
 				}
 
-				Object.keys(modelSchema.attributes).map(function(attribute){
-					return listener._subscribeToAttribute(type, recordId, attribute);
-				});
-
 				options.currentIncludes().map(function(link){
 					return listener.subscribeToLink(type, recordId, link, options.forLink(link));
 				});
 
 			});
+		},
+
+		subscribeToAttributes: function(){
+			var _this = this;
+			this.listener._enableListener(this.path, "child_changed", function(snapshot){
+				if(_this._isAttribute(snapshot.key())){
+					_this._updateAttribute(snapshot.key(), snapshot.val());
+				}
+			});
+		},
+
+		_updateAttribute: function(attribute, serialized){
+			var model = this.type;
+			var attrType = this.modelSchema.attributes[attribute].type;
+			var transformation = transformations.lookupTransformation(attrType);
+			var deserialized = transformation.deserialize(serialized);
+			var attributePath = this.path + "/" + attribute;
+
+			this.listener._emitDidTransform(new Operation['default']({ op: 'replace', path: attributePath, value: deserialized }));
+		},
+
+		_isAttribute: function(key){
+			return Object.keys(this.modelSchema.attributes).indexOf(key) !== -1;
 		},
 
 		update: function(){
