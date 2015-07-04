@@ -58,7 +58,7 @@ define('orbit-firebase/firebase-client', ['exports', 'orbit/lib/objects', 'orbit
 
 			var _this = this;
 			return new Orbit['default'].Promise(function(resolve, reject){
-				value = value || null; // undefined causes error in firebase client
+				value = value === undefined ? null : value; // undefined causes error in firebase client
 				_this.firebaseRef.child(path).set(value, function(error){
 					error ? reject(error) : resolve(value); // jshint ignore:line
 				});
@@ -246,6 +246,14 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 			return Object.keys(this._subscriptions);
 		},
 
+		activeSubscriptions: function(){
+			var _this = this;
+
+			return this.subscriptions().filter(function(subscription){
+				return _this._subscriptions[subscription].status === 'active';
+			});
+		},
+
 		hasActiveSubscription: function(subscriptionPath){
 			var subscription = this._subscriptions[subscriptionPath];
 			return subscription && subscription.status === 'active';
@@ -370,6 +378,25 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 
 		_emitDidTransform: function(operation){
 			this.emit("didTransform", operation);
+		},
+
+		_loadRecord: function(type, recordId){
+			var _this = this;
+			var path = [type, recordId].join("/");
+
+			return new Orbit['default'].Promise(function(resolve, reject){
+				_this._firebaseRef.child(path).once("value",
+					function(snapshot){
+						var deserializedRecord = _this._serializer.deserialize(type, recordId, snapshot.val());
+
+						_this._emitDidTransform(new Operation['default']({ op: 'add', path: path, value: deserializedRecord }) );
+						resolve(deserializedRecord);
+					},
+					function(error){
+						reject(error);
+					}
+				);
+			});
 		},
 
 		_enableListener: function(path, eventType, callback){
@@ -709,7 +736,7 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 			var firebaseClient = new FirebaseClient['default'](firebaseRef);
 
 			this._schemaUtils = new SchemaUtils['default'](this.schema);
-			this._firebaseTransformer = new FirebaseTransformer['default'](firebaseClient, schema, serializer);
+			this._firebaseTransformer = new FirebaseTransformer['default'](firebaseClient, schema, serializer, this._cache);
 			this._firebaseRequester = new FirebaseRequester['default'](firebaseClient, schema, serializer);
 			this._firebaseListener = new FirebaseListener['default'](firebaseRef, schema, serializer);
 
@@ -718,6 +745,11 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 
 			this._firebaseListener.on('didTransform', function(operation){
 				_this._operationSequencer.process(operation);
+			});
+
+			this._operationSequencer.on('didTransform', function(operation){
+				var inverse = _this._cache.transform(operation);
+				_this.didTransform(operation, inverse);
 			});
 
 			this._operationEncoder = new OperationEncoder['default'](schema);
@@ -814,7 +846,7 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 	});
 
 });
-define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', 'orbit-firebase/transformers/add-record', 'orbit-firebase/transformers/remove-record', 'orbit-firebase/transformers/replace-attribute', 'orbit-firebase/transformers/add-to-has-many', 'orbit-firebase/transformers/add-to-has-one', 'orbit-firebase/transformers/remove-has-one', 'orbit-firebase/transformers/replace-has-many', 'orbit-firebase/transformers/remove-from-has-many', 'orbit-firebase/transformers/update-meta'], function (exports, objects, AddRecord, RemoveRecord, ReplaceAttribute, AddToHasMany, AddToHasOne, RemoveHasOne, ReplaceHasMany, RemoveFromHasMany, UpdateMeta) {
+define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', 'orbit/main', 'orbit/lib/eq', 'orbit-firebase/transformers/add-record', 'orbit-firebase/transformers/remove-record', 'orbit-firebase/transformers/replace-attribute', 'orbit-firebase/transformers/add-to-has-many', 'orbit-firebase/transformers/add-to-has-one', 'orbit-firebase/transformers/remove-has-one', 'orbit-firebase/transformers/replace-has-many', 'orbit-firebase/transformers/remove-from-has-many', 'orbit-firebase/transformers/update-meta', 'orbit-firebase/related-inverse-links'], function (exports, objects, Orbit, eq, AddRecord, RemoveRecord, ReplaceAttribute, AddToHasMany, AddToHasOne, RemoveHasOne, ReplaceHasMany, RemoveFromHasMany, UpdateMeta, RelatedInverseLinksProcessor) {
 
 	'use strict';
 
@@ -822,6 +854,7 @@ define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', '
 		init: function(firebaseClient, schema, serializer, cache){
 			this._schema = schema;
 			this._firebaseClient = firebaseClient;
+			this._relatedInverseLinksProcessor = new RelatedInverseLinksProcessor['default'](schema, cache);
 
 			this._transformers = [
 				new AddRecord['default'](firebaseClient, schema, serializer),
@@ -834,25 +867,44 @@ define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', '
 				new RemoveFromHasMany['default'](firebaseClient, schema),
 				new UpdateMeta['default'](cache)
 			];
+
 		},
 
-		transform: function(operation){
+		transform: function(primaryOperation){
 			var _this = this;
-			this._normalizeOperation(operation);
+			var result;
 
+			var transformation = this._buildTransformation(primaryOperation);
+
+			var pending = transformation.map(function(operation){
+				var transformResult = _this._transformOperation(operation);
+				
+				if(eq.eq(operation.serialize(), primaryOperation.serialize())) {
+					result = transformResult;
+				}
+			});
+
+			if(!result) throw new Error("Result from primaryOperation is missing");
+
+			return Orbit['default'].all(pending).then(function(){
+				return result;
+			});
+		},
+
+		_buildTransformation: function(operation){
+			return this._relatedInverseLinksProcessor.process(operation);
+		},
+
+		_transformOperation: function(operation){
+			var _this = this;
 			var transformer = this._findTransformer(operation);
+
 			return transformer.transform(operation).then(function(result){
 				return _this._firebaseClient.push('operation', operation.serialize()).then(function(){
 					return result;
 				});
-			});
+			});		
 		},
-
-	    _normalizeOperation: function(op) {
-	      if (typeof op.path === 'string') {
-	      	op.path = op.path.split('/');
-	      }
-	    },
 
 		_findTransformer: function(operation){
 			for(var i = 0; i < this._transformers.length; i++){
@@ -1448,7 +1500,7 @@ define('orbit-firebase/operation-sequencer', ['exports', 'orbit/evented', 'orbit
     },
 
     _emit: function(operation){
-      this._cache.transform(operation);
+      this.emit('didTransform', operation);
       this._triggerOperationsDependentOn(operation);
     },
 
@@ -1470,8 +1522,7 @@ define('orbit-firebase/operation-sequencer', ['exports', 'orbit/evented', 'orbit
       if (this._isInitializeHasManyOp(operation)) return [recordPath];
 
       var relatedRecordPath = this._getRelatedRecordPath(operation);
-      var linkPath = this._getLinkPath(operation);
-      if (this._isModifyHasManyOp(operation)) return [recordPath, relatedRecordPath, linkPath];
+      if (this._isModifyHasManyOp(operation)) return [recordPath, relatedRecordPath];
 
       return [];
     },
@@ -1559,12 +1610,343 @@ define('orbit-firebase/operation-sequencer', ['exports', 'orbit/evented', 'orbit
       var linkedType = this._schema.linkDefinition(recordType, linkName).model;
       var linkedId = operation.path.length === 5 ? operation.path[4] : operation.value;
       return [linkedType, linkedId].join("/");
-    },
-
-    _getLinkPath: function(operation){
-      return operation.path.slice(0, 4).join("/");
     }
   });
+
+});
+define('orbit-firebase/related-inverse-links', ['exports', 'orbit-common/main', 'orbit/lib/objects', 'orbit-firebase/operation-matcher', 'orbit/operation', 'orbit-common/operation-encoder', 'orbit/lib/operations'], function (exports, OC, objects, OperationMatcher, Operation, OperationEncoder, lib__operations) {
+
+	'use strict';
+
+	function asHash(k,v){
+	  var hash = {};
+	  hash[k] = v;
+	  return hash;
+	}
+
+	function buildObject(keys, value){
+		var hash = {};
+		keys.forEach(function(key){
+			hash[key] = value;
+		});
+		return hash;
+	}
+
+	var SchemaUtils = objects.Class.extend({
+		init: function(schema){
+			this.schema = schema;
+		},
+
+		lookupLinkDef: function(model, link){
+			var modelSchema = this.schema.models[model];
+			if(!modelSchema) throw new Error("Could not find model for " + model);
+			var linkDef = modelSchema.links[link];
+			if(!linkDef) throw new Error("Could not find type for " + model + "/" + link);
+			return linkDef;
+		},
+
+		lookupRelatedLinkDef: function(model, link){
+			var linkDef = this.lookupLinkDef(model, link);
+			return this.schema.models[linkDef.model].links[linkDef.inverse];
+		},
+
+		linkTypeFor: function(model, link){
+			return this.lookupLinkDef(model, link).type;
+		},
+
+		modelTypeFor: function(model, link){
+			return this.lookupLinkDef(model, link).model;
+		},
+
+		modelSchema: function(type){
+			var modelSchema = this.schema.models[type];
+			if(!modelSchema) throw new Error("No model found for " + type);
+			return modelSchema;
+		},
+
+		linksFor: function(model){
+			return Object.keys(this.modelSchema(model).links);
+		},
+
+		inverseLinkFor: function(model, link){
+			return this.lookupLinkDef(model, link).inverse;
+		}
+	});
+
+	var ChangeDetails = objects.Class.extend({
+		init: function(path, value, schema, cache){
+			this.path = path;
+			this.value = value;
+			this.schema = schema;
+			this.schemaUtils = new SchemaUtils(schema);
+			this.cache = cache;
+		},
+
+		model: function(){
+			return this.path[0];
+		},
+
+		modelId: function(){
+			return this.path[1];
+		},
+
+		link: function(){
+			return this.path[3];
+		},
+
+		currentValue: function(){
+			return this.cache.retrieve(this.path);
+		},
+
+		linkDef: function(){
+			return this.schemaUtils.lookupLinkDef(this.model(), this.link());
+		},
+
+		originalInversePath: function(){
+			return [this.linkDef().model, this.currentValue(), "__rel", this.linkDef().inverse];
+		},
+
+		inverseLinkDef: function(){
+			return this.schemaUtils.lookupRelatedLinkDef(this.model(), this.link());
+		},
+
+		newInversePath: function(){
+			return [this.linkDef().model, this.value, "__rel", this.linkDef().inverse];
+		}
+	});
+
+	var RelationshipResolver = objects.Class.extend({
+		init: function(schema, cache, initializeLinks){
+			this.visited = [];
+			this.schema = schema;
+			this.schemaUtils = new SchemaUtils(schema);
+			this.cache = cache;
+			this.operations = [];
+			this.initializeLinks = initializeLinks;
+		},
+
+		visit: function(op, path, value){
+			if(this.hasVisited(path)) return;
+			this.markVisited(path);
+			var linkType = this.schemaUtils.linkTypeFor(path[0], path[3]);
+
+			if(!path[1]) throw new Error("invalid modelId: " + op + "|" + path + "|" + value);
+
+			this[linkType][op].call(this, path, value);
+		},
+
+		hasVisited: function(path){
+			return this.visited.indexOf(path.join("/")) !== -1;
+		},
+
+		markVisited: function(path){
+			this.visited.push(path.join("/"));
+		},
+
+		isUninitialized: function(path){
+			return this.cache.retrieve(path) === OC['default'].LINK_NOT_INITIALIZED;
+		},
+
+		hasOne: {
+			add: function(path, value){
+				var changeDetails = new ChangeDetails(path, value, this.schema, this.cache);
+
+				this.operations.push(new Operation['default']({ op: 'add', path: changeDetails.path, value: changeDetails.value }));
+				if(changeDetails.currentValue()){
+					this.visit("remove", changeDetails.originalInversePath(), changeDetails.modelId());
+				}
+				this.visit("add", changeDetails.newInversePath(), changeDetails.modelId());
+			},
+
+			remove: function(path, value){
+				var changeDetails = new ChangeDetails(path, value, this.schema, this.cache);
+				if(!value) return;
+				this.operations.push(new Operation['default']({ op: 'remove', path: changeDetails.path}));
+				if(changeDetails.currentValue()){
+					this.visit("remove", changeDetails.originalInversePath(), changeDetails.modelId());
+				}
+			},
+
+			replace: function(path, value){
+				var changeDetails = new ChangeDetails(path, value, this.schema, this.cache);
+
+				this.operations.push(new Operation['default']({ op: 'replace', path: changeDetails.path, value: changeDetails.value }));
+				if(changeDetails.currentValue()){
+					this.visit("remove", changeDetails.originalInversePath(), changeDetails.modelId());
+				}
+				this.visit("add", changeDetails.newInversePath(), changeDetails.modelId());
+			}
+		},
+
+		hasMany: {
+			add: function(path, value){
+
+				var linkDef = this.schemaUtils.lookupLinkDef(path[0], path[3]);
+				var inversePath = [linkDef.model, value, "__rel", linkDef.inverse];
+
+				this.operations.push(new Operation['default']({ op: 'add', path: path.concat(value), value: true }));
+				this.visit("add", inversePath, path[1]);
+			},
+
+			remove: function(path, value){
+				var linkDef = this.schemaUtils.lookupLinkDef(path[0], path[3]);
+				var inversePath = [linkDef.model, value, "__rel", linkDef.inverse];
+				this.operations.push(new Operation['default']({ op: 'remove', path: path.concat(value) }));
+				this.visit("remove", inversePath, path[1]);
+			},
+
+			replace: function(path, value){
+				var _this = this,
+					relatedLinkDef = this.schemaUtils.lookupRelatedLinkDef(path[0], path[3]);
+
+				this.operations.push(new Operation['default']({ op: 'replace', path: path, value: buildObject(value, true) }));
+
+				var linkValue = this.cache.retrieve(path);
+				var currentValue = linkValue ? Object.keys(linkValue) : [];
+				var modelId = path[1];
+				var linkDef = this.schemaUtils.lookupLinkDef(path[0], path[3]);
+
+				var added = value.filter(function(id){
+					return currentValue.indexOf(id) === -1;
+				});
+
+				var removed = currentValue.filter(function(id){
+					return value.indexOf(id) === -1;
+				});
+
+				added.forEach(function(id){
+					var inversePath = [linkDef.model, id, "__rel", linkDef.inverse];
+					_this.visit("add", inversePath, modelId);
+				});
+
+				removed.forEach(function(id){
+					var inversePath = [linkDef.model, id, "__rel", linkDef.inverse];
+					_this.visit("remove", inversePath, modelId);
+				});
+			}
+		}
+	});
+
+	exports['default'] = objects.Class.extend({
+		init: function(schema, cache){
+			this.schema = schema;
+			this.schemaUtils = new SchemaUtils(schema);
+			this.cache = cache;
+			this._operationEncoder = new OperationEncoder['default'](schema);
+		},
+
+		process: function(operation){
+			if(operation.path[2] === "__rel") return this.relatedLinkOperations(operation, false);
+			if(operation.path.length === 2) return this.relatedRecordOperations(operation);
+			return [operation];
+		},
+
+		relatedRecordOperations: function(operation){
+			var _this = this;
+			var model = operation.path[0];
+			var recordId = operation.path[1];
+			var record = this.cache.retrieve([model, recordId]) || operation.value;
+
+			if(!record) throw new Error("record not found ", [model, recordId].join("/"));
+
+			var ops = [operation];
+			var linkOps;
+
+			this.schemaUtils.linksFor(model).forEach(function(link){
+				var linkValue = record.__rel[link];
+				if(linkValue){
+					var linkOperation = {op: operation.op, path: [model, recordId, '__rel', link], value: linkValue};
+					linkOps = _this.relatedLinkOperations(linkOperation, true);
+					linkOps.forEach(function(linkOp){
+						ops.push(linkOp);
+					});
+				}
+			});
+
+			var coalesced = lib__operations.coalesceOperations(ops);
+			var sorted = this.sortedByPathLength(coalesced);
+
+			return sorted;
+		},
+
+		relatedLinkOperations: function(operation, initializeLinks){
+			var relationshipResolver = new RelationshipResolver(this.schema, this.cache, initializeLinks);
+			var normalized = this.normalize(operation);
+			relationshipResolver.visit(normalized.op, normalized.path, normalized.value);
+			var linkOps = relationshipResolver.operations;
+			var sorted = this.sortedByOp(linkOps);
+
+			return sorted;
+		},
+
+		sortedByPathLength: function(operations){
+			return operations.sort(function(a, b){
+				return a.path.length > b.path.length;
+			});
+		},
+
+		sortedByOp: function(operations){
+			var operationSortKey = this.operationSortKey;
+
+			return operations.sort(function(a, b){
+				return operationSortKey(a) > operationSortKey(b);
+			});
+		},
+
+		operationSortKey: function(operation){
+			var opOrder = ['remove', 'add', 'replace'];
+			return opOrder.indexOf(operation.op);
+		},
+
+		normalize: function(operation){
+			var linkDef = this.schemaUtils.lookupLinkDef(operation.path[0], operation.path[3]);
+			var path = operation.path;
+			var operationType = this._operationEncoder.identify(operation);
+
+			if(operationType === 'addHasMany'){
+				return {
+					op: 'replace',
+					path: operation.path,
+					value: Object.keys(operation.value)
+				};
+			}
+
+			if(operationType === 'removeHasMany'){
+				return {
+					op: 'replace',
+					path: operation.path,
+					value: []
+				};
+			}
+
+			if(["hasMany", "hasOne"].indexOf(linkDef.type) === -1) throw new Error("unsupported link type: " + linkDef.type);
+
+			if(linkDef.type === "hasOne" && operation.op === "add") return operation;
+			if(linkDef.type === "hasOne" && operation.op === "remove"){
+				return {
+					op: operation.op,
+					path: path,
+					value: this.cache.retrieve(path)
+				};
+			}
+			if(linkDef.type === "hasMany" && (['add', 'remove'].indexOf(operation.op) !== -1)) {
+				return {
+					op: operation.op,
+					path: path.slice(0,-1),
+					value: path[path.length-1]
+				};
+			}
+			if(linkDef.type === "hasMany" && operation.op === "replace"){
+				return {
+					op: operation.op,
+					path: operation.path,
+					value: Object.keys(operation.value)
+				};
+			}
+
+			return operation;
+		}
+	});
 
 });
 define('orbit-firebase/subscriptions/attribute-subscription', ['exports', 'orbit-firebase/subscriptions/subscription', 'orbit/operation', 'orbit/main', 'orbit-firebase/transformations'], function (exports, Subscription, Operation, Orbit, transformations) {
@@ -1620,7 +2002,7 @@ define('orbit-firebase/subscriptions/has-many-subscription', ['exports', 'orbit-
 			this._type = splitPath[0];
 			this._recordId = splitPath[1];
 			this._link = splitPath[2];
-			this._inverseLink = listener._schemaUtils.inverseLinkFor(this._type, this._link);
+			// this._inverseLink = listener._schemaUtils.inverseLinkFor(this._type, this._link);
 			this._linkType = listener._schemaUtils.modelTypeFor(this._type, this._link);
 		},
 
@@ -1686,7 +2068,7 @@ define('orbit-firebase/subscriptions/has-many-subscription', ['exports', 'orbit-
 			var path = this.path;
 			var listener = this._listener;
 			var linkType = this._linkType;
-			var options = this._inverseLink ? this.options.addInclude(this._inverseLink) : this.options;
+			var options = this.options; //this._inverseLink ? this.options.addInclude(this._inverseLink) : this.options;
 
 			return listener._firebaseClient.valueAt(path).then(function(linkValue){
 				var recordIds = Object.keys(linkValue||{});
@@ -1713,7 +2095,7 @@ define('orbit-firebase/subscriptions/has-one-subscription', ['exports', 'orbit-f
 			this._type = splitPath[0];
 			this._recordId = splitPath[1];
 			this._link = splitPath[2];
-			this._inverseLink = listener._schemaUtils.inverseLinkFor(this._type, this._link);
+			// this._inverseLink = listener._schemaUtils.inverseLinkFor(this._type, this._link);
 			this._listener = listener;
 			this._linkType = listener._schemaUtils.modelTypeFor(this._type, this._link);
 		},
@@ -1862,31 +2244,49 @@ define('orbit-firebase/subscriptions/record-subscription', ['exports', 'orbit-fi
 			var modelSchema = this.modelSchema;
 			var options = this.options;
 
-			return listener._enableListener(path, "value", function(snapshot){
+			return listener._loadRecord(type, recordId).then(function(record){
 				_this.subscribeToAttributes();
-				var value = snapshot.val();
+				_this.subscribeToLinks();
+				_this.subscribeToRecordRemoved();
+			});
+		},
 
-				if(value){
-					var deserializedRecord = listener._serializer.deserialize(type, recordId, snapshot.val());
-					listener._emitDidTransform(new Operation['default']({ op: 'add', path: path, value: deserializedRecord }) );
-				} else {
-					listener._emitDidTransform(new Operation['default']({ op: 'remove', path: path }));
+		subscribeToRecordRemoved: function(){
+			var _this = this;
+			var idPath = this.path + "/id";
+			var listener = this.listener;
+
+			listener._enableListener(idPath, "value", function(snapshot){
+				if(!snapshot.val()){
+					listener._emitDidTransform(new Operation['default']({ op: 'remove', path: _this.path }));
 				}
+			});
+		},
 
-				options.currentIncludes().map(function(link){
-					return listener.subscribeToLink(type, recordId, link, options.forLink(link));
-				});
+		subscribeToLinks: function(){
+			var _this = this;
 
+			this.options.currentIncludes().map(function(link){
+				return _this.listener.subscribeToLink(_this.type, _this.recordId, link, _this.options.forLink(link));
 			});
 		},
 
 		subscribeToAttributes: function(){
 			var _this = this;
-			this.listener._enableListener(this.path, "child_changed", function(snapshot){
-				if(_this._isAttribute(snapshot.key())){
-					_this._updateAttribute(snapshot.key(), snapshot.val());
+			var listener = this.listener;
+
+			listener._enableListener(this.path, "child_changed", function(snapshot){
+				var key = snapshot.key();
+				var value = snapshot.val();
+
+				if(_this._isAttribute(key)){
+					_this._updateAttribute(key, value);
 				}
 			});
+		},
+
+		_removeRecord: function(){
+			this.listener._emitDidTransform(new Operation['default']({ op: 'remove', path: this.path }));
 		},
 
 		_updateAttribute: function(attribute, serialized){
