@@ -744,7 +744,7 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 			var firebaseClient = new FirebaseClient['default'](firebaseRef);
 
 			this._schemaUtils = new SchemaUtils['default'](this.schema);
-			this._firebaseTransformer = new FirebaseTransformer['default'](firebaseClient, schema, serializer);
+			this._firebaseTransformer = new FirebaseTransformer['default'](firebaseClient, schema, serializer, this._cache);
 			this._firebaseRequester = new FirebaseRequester['default'](firebaseClient, schema, serializer);
 			this._firebaseListener = new FirebaseListener['default'](firebaseRef, schema, serializer);
 
@@ -854,7 +854,7 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 	});
 
 });
-define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', 'orbit-firebase/transformers/add-record', 'orbit-firebase/transformers/remove-record', 'orbit-firebase/transformers/replace-attribute', 'orbit-firebase/transformers/add-to-has-many', 'orbit-firebase/transformers/add-to-has-one', 'orbit-firebase/transformers/remove-has-one', 'orbit-firebase/transformers/replace-has-many', 'orbit-firebase/transformers/remove-from-has-many', 'orbit-firebase/transformers/update-meta'], function (exports, objects, AddRecord, RemoveRecord, ReplaceAttribute, AddToHasMany, AddToHasOne, RemoveHasOne, ReplaceHasMany, RemoveFromHasMany, UpdateMeta) {
+define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', 'orbit/main', 'orbit/lib/eq', 'orbit-firebase/transformers/add-record', 'orbit-firebase/transformers/remove-record', 'orbit-firebase/transformers/replace-attribute', 'orbit-firebase/transformers/add-to-has-many', 'orbit-firebase/transformers/add-to-has-one', 'orbit-firebase/transformers/remove-has-one', 'orbit-firebase/transformers/replace-has-many', 'orbit-firebase/transformers/remove-from-has-many', 'orbit-firebase/transformers/update-meta', 'orbit-firebase/related-inverse-links'], function (exports, objects, Orbit, eq, AddRecord, RemoveRecord, ReplaceAttribute, AddToHasMany, AddToHasOne, RemoveHasOne, ReplaceHasMany, RemoveFromHasMany, UpdateMeta, RelatedInverseLinksProcessor) {
 
 	'use strict';
 
@@ -862,6 +862,7 @@ define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', '
 		init: function(firebaseClient, schema, serializer, cache){
 			this._schema = schema;
 			this._firebaseClient = firebaseClient;
+			this._relatedInverseLinksProcessor = new RelatedInverseLinksProcessor['default'](schema, cache);
 
 			this._transformers = [
 				new AddRecord['default'](firebaseClient, schema, serializer),
@@ -874,25 +875,44 @@ define('orbit-firebase/firebase-transformer', ['exports', 'orbit/lib/objects', '
 				new RemoveFromHasMany['default'](firebaseClient, schema),
 				new UpdateMeta['default'](cache)
 			];
+
 		},
 
-		transform: function(operation){
+		transform: function(primaryOperation){
 			var _this = this;
-			this._normalizeOperation(operation);
+			var result;
 
+			var transformation = this._buildTransformation(primaryOperation);
+
+			var pending = transformation.map(function(operation){
+				var transformResult = _this._transformOperation(operation);
+				
+				if(eq.eq(operation.serialize(), primaryOperation.serialize())) {
+					result = transformResult;
+				}
+			});
+
+			if(!result) throw new Error("Result from primaryOperation is missing");
+
+			return Orbit['default'].all(pending).then(function(){
+				return result;
+			});
+		},
+
+		_buildTransformation: function(operation){
+			return this._relatedInverseLinksProcessor.process(operation);
+		},
+
+		_transformOperation: function(operation){
+			var _this = this;
 			var transformer = this._findTransformer(operation);
+
 			return transformer.transform(operation).then(function(result){
 				return _this._firebaseClient.push('operation', operation.serialize()).then(function(){
 					return result;
 				});
-			});
+			});		
 		},
-
-	    _normalizeOperation: function(op) {
-	      if (typeof op.path === 'string') {
-	      	op.path = op.path.split('/');
-	      }
-	    },
 
 		_findTransformer: function(operation){
 			for(var i = 0; i < this._transformers.length; i++){
