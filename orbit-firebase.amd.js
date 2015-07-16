@@ -1440,7 +1440,6 @@ define('orbit-firebase/operation-filter', ['exports', 'orbit/lib/eq', 'orbit/lib
     blocksNext: function(operation){
       if(this.isBlocked(operation)){
         this.unblock(operation);
-        console.log("blocked", operation.serialize());
         return true;
       }
       return false;
