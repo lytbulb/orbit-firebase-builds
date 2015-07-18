@@ -385,6 +385,7 @@ define('orbit-firebase/firebase-listener', ['exports', 'orbit/lib/objects', 'orb
 		},
 
 		_emitDidTransform: function(operation){
+			// console.log("fb.emitted", [operation.id, operation.op, operation.path.join("/"), JSON.stringify(operation.value)].join("::"));
 			this.emit("didTransform", operation);
 		},
 
@@ -718,7 +719,7 @@ define('orbit-firebase/firebase-serializer', ['exports', 'orbit-common/serialize
 	});
 
 });
-define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit/main', 'orbit-common/main', 'orbit/lib/assert', 'orbit-common/source', 'orbit-firebase/lib/array-utils', 'orbit/operation', 'orbit-firebase/firebase-client', 'orbit-firebase/firebase-requester', 'orbit-firebase/firebase-transformer', 'orbit-firebase/firebase-serializer', 'orbit-firebase/firebase-listener', 'orbit-firebase/cache-source', 'orbit-firebase/operation-matcher', 'orbit-firebase/operation-decomposer', 'orbit-firebase/operation-sequencer', 'orbit-common/operation-encoder', 'orbit-firebase/operation-filter', 'orbit-firebase/lib/schema-utils', 'orbit-firebase/lib/operation-utils'], function (exports, objects, Orbit, OC, assert, Source, array_utils, Operation, FirebaseClient, FirebaseRequester, FirebaseTransformer, FirebaseSerializer, FirebaseListener, CacheSource, OperationMatcher, OperationDecomposer, OperationSequencer, OperationEncoder, OperationFilter, SchemaUtils, operation_utils) {
+define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit/main', 'orbit-common/main', 'orbit/lib/assert', 'orbit-common/source', 'orbit-firebase/lib/array-utils', 'orbit/operation', 'orbit-firebase/firebase-client', 'orbit-firebase/firebase-requester', 'orbit-firebase/firebase-transformer', 'orbit-firebase/firebase-serializer', 'orbit-firebase/firebase-listener', 'orbit-firebase/cache-source', 'orbit-firebase/operation-matcher', 'orbit-firebase/operation-decomposer', 'orbit-firebase/operation-sequencer', 'orbit-common/operation-encoder', 'orbit-firebase/operation-filter', 'orbit-firebase/lib/schema-utils', 'orbit-firebase/lib/cache-utils', 'orbit-firebase/lib/operation-utils'], function (exports, objects, Orbit, OC, assert, Source, array_utils, Operation, FirebaseClient, FirebaseRequester, FirebaseTransformer, FirebaseSerializer, FirebaseListener, CacheSource, OperationMatcher, OperationDecomposer, OperationSequencer, OperationEncoder, OperationFilter, SchemaUtils, CacheUtils, operation_utils) {
 
 	'use strict';
 
@@ -728,6 +729,8 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 		init: function(schema, options){
 			var _this = this;
 			options = options || {};
+
+			window.firebaseSource = this;
 
 			this._super.apply(this, arguments);
 			this._cache.maintainInverseLinks = false;
@@ -744,6 +747,7 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 			var firebaseClient = new FirebaseClient['default'](firebaseRef);
 
 			this._schemaUtils = new SchemaUtils['default'](this.schema);
+			this._cacheUtils = new CacheUtils['default'](this._cache);
 			this._firebaseTransformer = new FirebaseTransformer['default'](firebaseClient, schema, serializer);
 			this._firebaseRequester = new FirebaseRequester['default'](firebaseClient, schema, serializer);
 			this._firebaseListener = new FirebaseListener['default'](firebaseRef, schema, serializer);
@@ -756,20 +760,17 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 				_this._operationSequencer.process(operation);
 			});
 
-
 			this._operationSequencer.on('didTransform', function(operation){
-				var inverse = _this._cache.transform(operation);
+				// console.log("sequenced", [operation.id, operation.op, operation.path.join("/"), JSON.stringify(operation.value)].join("::"));
+				if(!_this._operationFilter.blocksNext(operation) && !_this._cacheUtils.isRedundent(operation)){
+					var inverse = _this._cache.transform(operation);
 
-				if(!_this._operationFilter.blocksNext(operation)){
+					console.log("fb.transmitting ", [operation.id, operation.op, operation.path.join("/"), JSON.stringify(operation.value)].join("::"));
 					_this.didTransform(operation, inverse);
 				}
 			});
 
 			this._operationEncoder = new OperationEncoder['default'](schema);
-
-			this.on("didTransform", function(operation){
-				// console.log("fb.transmitting", operation.path.join("/"), operation.value);
-			});
 		},
 
 		disconnect: function(){
@@ -796,8 +797,6 @@ define('orbit-firebase/firebase-source', ['exports', 'orbit/lib/objects', 'orbit
 					operation.value = _this.schema.normalize(operation.path[0], operation.value);
 				}
 
-			}).then(function(){
-				_this._operationSequencer.process(operation);
 			});
 		},
 
@@ -976,13 +975,14 @@ define('orbit-firebase/lib/array-utils', ['exports'], function (exports) {
 	}
 
 });
-define('orbit-firebase/lib/cache-utils', ['exports', 'orbit/lib/objects'], function (exports, objects) {
+define('orbit-firebase/lib/cache-utils', ['exports', 'orbit/lib/objects', 'orbit-common/operation-encoder', 'orbit/lib/eq'], function (exports, objects, OperationEncoder, eq) {
 
 	'use strict';
 
 	exports['default'] = objects.Class.extend({
 		init: function(cache){
 			this.cache = cache;
+			this._operationEncoder = new OperationEncoder['default'](cache.schema);
 		},
 
 		retrieveLink: function(type, id, link) {
@@ -992,6 +992,24 @@ define('orbit-firebase/lib/cache-utils', ['exports', 'orbit/lib/objects'], funct
 			}
 			return val;
 		},
+
+		isRedundent: function(operation){
+			var operationType = this._operationEncoder.identify(operation);
+			
+			if(operationType === 'addRecord'){
+				return !!this.cache.retrieve(operation.path);
+			}
+
+			if(operation.op === 'add' || operation.op === 'replace'){
+				return eq.eq(this.cache.retrieve(operation.path), operation.value);
+			}
+
+			if(operation.op === 'remove'){
+				return !this.cache.retrieve(operation.path);
+			}
+
+			return false;
+		}
 	});
 
 });
@@ -1447,8 +1465,13 @@ define('orbit-firebase/operation-filter', ['exports', 'orbit/lib/eq', 'orbit/lib
 
     blocksNext: function(operation){
       if(this.isBlocked(operation)){
+        // console.log("blocking", [operation.id, operation.op, operation.path.join("/"), JSON.stringify(operation.value)].join("::"));
+
         this.unblock(operation);
         return true;
+      }
+      else if(window.debugEnabled){
+        debugger
       }
       return false;
     },
@@ -1471,6 +1494,9 @@ define('orbit-firebase/operation-filter', ['exports', 'orbit/lib/eq', 'orbit/lib
       for(i = 0; i < collection.length; i++){
         candidate = collection[i];
         if(eq.eq(candidate.value, operation.value) && eq.eq(candidate.op, operation.op)){
+          return i;
+        }
+        if(candidate.op === 'add' && candidate.path.length === 2 && operation.op === candidate.op){
           return i;
         }
       }
@@ -1532,6 +1558,7 @@ define('orbit-firebase/operation-sequencer', ['exports', 'orbit/evented', 'orbit
     },
 
     process: function(operation){
+      // console.log("processing", [operation.id, operation.op, operation.path.join("/"), JSON.stringify(operation.value)].join("::"));
       if(this._isRedundent(operation)) return;
 
       var requiredPaths = this._requiredPathsFor(operation);
@@ -2146,11 +2173,14 @@ define('orbit-firebase/subscriptions/has-one-subscription', ['exports', 'orbit-f
 			var link = this._link;
 			var options = this.options;
 			var linkType = this._linkType;
+			var enabled = false;
 
 			return listener._enableListener(this.path, "value", function(snapshot){
+				var wasEnabled = enabled;
+				enabled = true;
 				var linkId = snapshot.val();
 
-				return linkId ? _this._replaceLink(linkId) : _this._removeLink();
+				return linkId ? _this._replaceLink(linkId) : _this._removeLink(wasEnabled);
 			});
 		},
 
@@ -2182,7 +2212,8 @@ define('orbit-firebase/subscriptions/has-one-subscription', ['exports', 'orbit-f
 			});
 		},
 
-		_removeLink: function(){
+		_removeLink: function(wasEnabled){
+			if(!wasEnabled) return;
 			var listener = this._listener;
 			var type = this._type;
 			var recordId = this._recordId;
