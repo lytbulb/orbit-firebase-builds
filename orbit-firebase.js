@@ -1470,9 +1470,7 @@ define('orbit-firebase/operation-filter', ['exports', 'orbit/lib/eq', 'orbit/lib
         this.unblock(operation);
         return true;
       }
-      else if(window.debugEnabled){
-        debugger
-      }
+
       return false;
     },
 
